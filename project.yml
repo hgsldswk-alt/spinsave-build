@@ -1,0 +1,123 @@
+name: JinTian
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: zh-Hans
+  knownRegions: [zh-Hans, en, zh-Hant, ja]
+settings:
+  base:
+    APP_ID: com.hgsldswk.spinsave
+    APP_STORE_ID: "6834582845"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  JinTian:
+    type: application
+    platform: iOS
+    sources:
+      - JinTian
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_ID)
+        TARGETED_DEVICE_FAMILY: "1"  # XcodeGen 默认 1,2 会盖掉项目级设置，必须写在 target 上
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: JinTian AppStore
+    info:
+      path: JinTian/Info.plist
+      properties:
+        CFBundleDisplayName: 今天存多少
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ITSAppUsesNonExemptEncryption: false
+        JinTianAppGroup: group.$(APP_ID)
+        JinTianProProductID: $(APP_ID).pro
+        JinTianTrialProductID: $(APP_ID).trial
+        APP_STORE_ID: $(APP_STORE_ID)
+    entitlements:
+      path: JinTian/JinTian.entitlements
+      properties:
+        com.apple.security.application-groups: [group.$(APP_ID)]
+    dependencies:
+      - target: JinTianWidget
+  JinTianWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - JinTianWidget
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_ID).widget
+        TARGETED_DEVICE_FAMILY: "1"  # XcodeGen 默认 1,2 会盖掉项目级设置，必须写在 target 上
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: Apple Distribution
+          PROVISIONING_PROFILE_SPECIFIER: JinTian Widget AppStore
+    info:
+      path: JinTianWidget/Info.plist
+      properties:
+        CFBundleDisplayName: 今天存多少
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        JinTianAppGroup: group.$(APP_ID)
+    entitlements:
+      path: JinTianWidget/JinTianWidget.entitlements
+      properties:
+        com.apple.security.application-groups: [group.$(APP_ID)]
+  JinTianTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - JinTianTests
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_ID).tests
+        GENERATE_INFOPLIST_FILE: YES
+  JinTianUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - JinTianUITests
+    dependencies:
+      - target: JinTian
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(APP_ID).uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: JinTian
+schemes:
+  JinTian:
+    build:
+      targets:
+        JinTian: all
+        JinTianTests: [test]
+    test:
+      config: Debug
+      targets: [JinTianTests]
+  JinTianUI:
+    build:
+      targets:
+        JinTian: all
+        JinTianUITests: [test]
+    test:
+      config: Debug
+      targets: [JinTianUITests]

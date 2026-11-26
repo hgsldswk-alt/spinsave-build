@@ -1,0 +1,424 @@
+import XCTest
+
+/// Isolated Debug storage only. Every milestone is also kept as an xcresult attachment.
+final class FlowUITests: XCTestCase {
+    private var app: XCUIApplication!
+
+    override func setUp() {
+        continueAfterFailure = false
+        app = XCUIApplication()
+    }
+
+    /// 系统分享面板在测试里看不到我们给 controller.view 设的 identifier，按系统面板自带的元素判断。
+    private func waitForShareSheet(timeout: TimeInterval = 10) -> Bool {
+        let candidates: [XCUIElement] = [
+            app.otherElements["ActivityListView"], app.otherElements["systemShare"],
+            app.navigationBars["UIActivityContentView"], app.buttons["Copy"], app.buttons["拷贝"], app.buttons["复制"],
+            app.cells["Copy"], app.cells["拷贝"]
+        ]
+        let end = Date().addingTimeInterval(timeout)
+        while Date() < end {
+            if candidates.contains(where: { $0.exists }) { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        }
+        return false
+    }
+    private func launch(_ extra: [String] = [], reset: Bool = true, onboarded: Bool = true) {
+        app.launchArguments = ["-ui-testing", "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
+            + (extra.contains("-clipboard-code") ? [] : ["-hide-paste-hint"])
+            + (reset ? ["-reset"] : []) + (onboarded ? ["-onboarded"] : []) + extra
+        app.launch()
+        let marker: XCUIElement
+        if !onboarded { marker = app.staticTexts["onboardingTitle"] }
+        else if extra.contains("-import-code") { marker = app.alerts.firstMatch }
+        else if extra.contains("-expired") || extra.contains("-settings") || extra.contains("-share") || extra.contains("-paywall") {
+            marker = app.buttons["closeSheet"]
+        } else { marker = app.staticTexts["streakValue"] }
+        XCTAssertTrue(marker.waitForExistence(timeout: 10))
+    }
+
+    private func shot(_ name: String) throws {
+        let png = XCUIScreen.main.screenshot().pngRepresentation
+        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let env = ProcessInfo.processInfo.environment
+        if let directory = env["SHOTS_DIR"] ?? env["TEST_RUNNER_SHOTS_DIR"], !directory.isEmpty {
+            // The sandbox may not be able to write the host path. CI exports attachments as fallback.
+            do {
+                let folder = URL(fileURLWithPath: directory, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try png.write(to: folder.appendingPathComponent(name + ".png"))
+            } catch {
+                let note = XCTAttachment(string: "Host screenshot path unavailable; use xcresult attachment: \(error)")
+                note.lifetime = .keepAlways
+                add(note)
+            }
+        }
+    }
+
+    private func tap(_ identifier: String, scroll: Bool = true) {
+        let button = app.buttons[identifier].firstMatch
+        if scroll { reveal(button) }
+        XCTAssertTrue(button.waitForExistence(timeout: 5), identifier)
+        XCTAssertTrue(button.isHittable, identifier)
+        button.tap()
+    }
+    /// SwiftUI alert buttons don't carry accessibilityIdentifier, so tap the alert's only button.
+    private func dismissAlert() {
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 5))
+        alert.buttons.firstMatch.tap()
+        XCTAssertTrue(wait { !alert.exists })
+    }
+    private func reveal(_ element: XCUIElement) {
+        for _ in 0..<8 {
+            if element.exists && element.isHittable { return }
+            app.swipeUp()
+        }
+        for _ in 0..<8 {
+            if element.exists && element.isHittable { return }
+            app.swipeDown()
+        }
+    }
+
+    private func wait(_ predicate: @escaping () -> Bool) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in predicate() }, object: nil)
+        return XCTWaiter.wait(for: [expectation], timeout: 8) == .completed
+    }
+
+    private func cents(_ identifier: String) -> Int {
+        let text = app.staticTexts[identifier].label.replacingOccurrences(of: "¥", with: "").replacingOccurrences(of: "+", with: "")
+        let parts = text.split(separator: ".")
+        guard (1...2).contains(parts.count), let yuan = parts.first.flatMap({ Int($0) }) else {
+            XCTFail("Invalid amount: \(text)"); return -1
+        }
+        let fraction = parts.count == 2 ? Int(parts[1]) ?? 0 : 0
+        return yuan * 100 + fraction
+    }
+
+    private func replaceText(_ identifier: String, with text: String) {
+        let field = app.textFields[identifier]
+        reveal(field)
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let old = (field.value as? String) ?? ""
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count + 2))
+        field.typeText(text)
+    }
+
+    private func configureTwenty() throws {
+        tap("openSettings")
+        XCTAssertTrue(app.textFields["minimumAmount"].waitForExistence(timeout: 5))
+        try shot("04-wheel-settings-before")
+        tap("preset-20")
+        XCTAssertEqual(app.textFields["minimumAmount"].value as? String, "1")
+        XCTAssertEqual(app.textFields["maximumAmount"].value as? String, "20")
+        XCTAssertEqual(app.switches["integersOnly"].value as? String, "1")
+        try shot("05-wheel-settings-1-to-20")
+        tap("saveWheel")
+        XCTAssertTrue(wait { !self.app.buttons["saveWheel"].exists })
+        try shot("06-wheel-settings-saved")
+    }
+
+    func testFirstLaunchSpinSaveSettingsAndShare() throws {
+        launch()
+        XCTAssertEqual(app.staticTexts["streakValue"].label, "0")
+        XCTAssertEqual(cents("totalValue"), 0)
+        try shot("01-first-launch")
+        tap("openShare")
+        XCTAssertTrue(app.buttons["pasteCode"].waitForExistence(timeout: 5))
+        tap("closeSheet", scroll: false)
+        tap("spinButton", scroll: false)
+        XCTAssertTrue(app.buttons["shareToday"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["markSaved"].exists)
+        let amount = cents("todayAmount")
+        XCTAssertTrue((100...3000).contains(amount))
+        XCTAssertEqual(amount % 100, 0)
+        try shot("spun")
+        XCTAssertTrue(wait { self.app.staticTexts["streakValue"].label == "1" })
+        XCTAssertEqual(cents("totalValue"), amount)
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        try shot("03-saved")
+        try configureTwenty()
+        // Restarting and changing settings must not allow another draw today.
+        app.terminate()
+        launch(reset: false)
+        XCTAssertEqual(cents("todayAmount"), amount)
+        XCTAssertEqual(cents("totalValue"), amount)
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        tap("openSettings")
+        XCTAssertTrue(app.textFields["maximumAmount"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.textFields["maximumAmount"].value as? String, "20.00")
+        tap("closeSheet", scroll: false)
+        app.swipeDown()
+        tap("openShare")
+        XCTAssertTrue(app.images["sharePreview"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["copyShareCode"].exists)
+        try shot("07-share-card")
+        tap("copyShareCode")
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
+        try shot("08-share-code-copied")
+        dismissAlert()
+    }
+
+    func testImportCodePreservesTodayAndRecords() throws {
+        launch(["-demo", "-spun"])
+        XCTAssertEqual(app.staticTexts["streakValue"].label, "13")
+        XCTAssertEqual(cents("totalValue"), 25650)
+        let amount = cents("todayAmount")
+        try shot("09-import-before")
+        app.terminate()
+        // Python zlib fixture: v1, imported goal, ¥1000 target, integer ¥1–20 wheel.
+        launch(["-import-code", Self.importCode], reset: false)
+        XCTAssertTrue(app.alerts.firstMatch.waitForExistence(timeout: 5))
+        try shot("10-import-confirmation")
+        dismissAlert()
+        XCTAssertEqual(cents("todayAmount"), amount)
+        XCTAssertEqual(cents("totalValue"), 25650)
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        tap("openSettings")
+        XCTAssertTrue(app.textFields["maximumAmount"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.textFields["maximumAmount"].value as? String, "20.00")
+        try shot("11-imported-wheel")
+        tap("closeSheet", scroll: false)
+        tap("openGoals")
+        XCTAssertTrue(app.textFields["goalName"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.textFields["goalName"].value as? String, "Imported goal")
+        XCTAssertEqual(app.textFields["goalAmount"].value as? String, "1000.00")
+        try shot("12-imported-goal")
+    }
+
+    func testGoalRangeApplyManualEstimateAndPersistence() throws {
+        launch()
+        tap("openSettings")
+        replaceText("calculatorTarget", with: "100")
+        replaceText("calculatorDays", with: "10")
+        tap("applyGoalRange")
+        reveal(app.staticTexts["manualEstimate"])
+        XCTAssertTrue(app.staticTexts["manualEstimate"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["manualEstimate"].label.contains("10"))
+        replaceText("maximumAmount", with: "1")
+        reveal(app.staticTexts["manualEstimate"])
+        XCTAssertTrue(wait { self.app.staticTexts["manualEstimate"].label.contains("100") })
+        try shot("23-goal-range-manual-estimate")
+        if app.buttons["keyboardDone"].exists { app.buttons["keyboardDone"].tap() }
+        tap("saveWheel")
+        XCTAssertTrue(wait { !self.app.buttons["saveWheel"].exists })
+        tap("openGoals")
+        XCTAssertEqual(app.textFields["goalAmount"].value as? String, "100.00")
+        tap("closeSheet", scroll: false)
+        app.terminate()
+        launch(reset: false)
+        tap("openSettings")
+        XCTAssertEqual(app.textFields["calculatorTarget"].value as? String, "100.00")
+        try shot("24-goal-plan-persisted")
+    }
+
+    func testExpiredTrialStillAllowsSavingAndReading() throws {
+        launch(["-demo", "-expired"])
+        XCTAssertTrue(app.staticTexts["expiredCopy"].waitForExistence(timeout: 5))
+        try shot("13-expired-notice")
+        tap("closeSheet", scroll: false)
+        XCTAssertEqual(cents("totalValue"), 23650)
+        tap("spinButton", scroll: false)
+        XCTAssertTrue(app.buttons["shareToday"].waitForExistence(timeout: 8))
+        let amount = cents("todayAmount")
+        XCTAssertTrue(wait { self.app.staticTexts["streakValue"].label == "13" })
+        XCTAssertEqual(cents("totalValue"), 23650 + amount)
+        try shot("14-expired-saved-free")
+        // 「已记上 · 撤销」条盖在页面底部 5 秒，等它收起再点底部的「统计」，否则会点到撤销条上。
+        XCTAssertTrue(wait { !self.app.buttons["undoToday"].exists })
+        tap("openStatistics")
+        XCTAssertTrue(app.staticTexts["expiredCopy"].waitForExistence(timeout: 5))
+        try shot("15-premium-statistics-gate")
+    }
+
+    func testDeleteAndRestoreCannotReroll() throws {
+        launch(["-demo", "-spun"])
+        let amount = cents("todayAmount")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let c = calendar.dateComponents([.year, .month, .day], from: Date())
+        let today = String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
+        tap("day-" + today)
+        try shot("16-record-editor")
+        tap("deleteRecord")
+        tap("confirmDelete", scroll: false)
+        XCTAssertTrue(app.buttons["restoreToday"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        XCTAssertEqual(cents("totalValue"), 23650)
+        try shot("17-record-deleted")
+        tap("restoreToday")
+        tap("saveRecord")
+        XCTAssertTrue(wait { !self.app.buttons["saveRecord"].exists })
+        // A premium demo may show its newly earned milestone when restored.
+        if app.buttons["closeSheet"].exists { tap("closeSheet", scroll: false) }
+        XCTAssertEqual(cents("todayAmount"), amount)
+        XCTAssertEqual(cents("totalValue"), 23650 + amount)
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        try shot("18-record-restored")
+    }
+
+    func testEditedAmountAndMultipleGoalsStayIndependent() throws {
+        launch(["-demo", "-spun"])
+        tap("openGoals")
+        XCTAssertTrue(app.textFields["goalName"].waitForExistence(timeout: 5))
+        let oldName = app.textFields["goalName"].value as? String
+        tap("addGoal")
+        // The goal list grows, so the lazily rendered editor field may scroll out of the hierarchy.
+        reveal(app.textFields["goalName"])
+        XCTAssertTrue(wait { self.app.textFields["goalName"].exists && (self.app.textFields["goalName"].value as? String) != oldName })
+        replaceText("goalName", with: "Second goal")
+        try shot("19-second-goal-editor")
+        tap("saveGoal")
+        XCTAssertTrue(app.buttons["spinButton"].waitForExistence(timeout: 5))
+        XCTAssertEqual(cents("totalValue"), 0)
+        tap("spinButton", scroll: false)
+        XCTAssertTrue(app.buttons["shareToday"].waitForExistence(timeout: 8))
+        let secondTotal = cents("totalValue")
+        try shot("20-second-goal-saved")
+        tap("openGoals")
+        let firstGoal = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "selectGoal-")).element(boundBy: 0)
+        XCTAssertTrue(firstGoal.waitForExistence(timeout: 5))
+        firstGoal.tap()
+        tap("closeSheet", scroll: false)
+        XCTAssertEqual(cents("totalValue"), 25650)
+        XCTAssertEqual(cents("todayAmount"), 2000)
+        // Open today's editor through its stable result-specific action.
+        tap("editToday")
+        replaceText("recordAmount", with: "12.34")
+        tap("saveRecord")
+        XCTAssertTrue(wait { !self.app.buttons["saveRecord"].exists })
+        XCTAssertEqual(cents("todayAmount"), 1234)
+        XCTAssertEqual(cents("totalValue"), 24884)
+        try shot("21-corrected-amount")
+        tap("openGoals")
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "selectGoal-")).element(boundBy: 1).tap()
+        tap("closeSheet", scroll: false)
+        XCTAssertEqual(cents("totalValue"), secondTotal)
+        try shot("22-independent-goal-records")
+    }
+
+    func testOnboardingCasualTakesTwoTapsAndPersists() throws {
+        launch(onboarded: false)
+        try shot("onboarding-1")
+        tap("onboardingCasual", scroll: false) // Tap 1: go directly to the wheel.
+        XCTAssertTrue(app.buttons["spinButton"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["goalProgress"].exists)
+        XCTAssertFalse(app.staticTexts["projectedCompletion"].exists)
+        tap("spinButton", scroll: false) // Tap 2: the first deposit is saved automatically.
+        XCTAssertTrue(app.buttons["shareToday"].waitForExistence(timeout: 8))
+        let amount = cents("todayAmount")
+        XCTAssertTrue((100...2000).contains(amount))
+        XCTAssertEqual(cents("totalValue"), amount)
+        XCTAssertFalse(app.buttons["markSaved"].exists)
+        try shot("25-casual-saved")
+        // Do not inject -onboarded: verify the actual stored flag survived.
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "-reset" || $0 == "-onboarded" }
+        app.launch()
+        XCTAssertTrue(app.buttons["shareToday"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.staticTexts["onboardingTitle"].exists)
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        XCTAssertEqual(cents("totalValue"), amount)
+        tap("openSettings")
+        replaceText("calculatorTarget", with: "1000")
+        replaceText("calculatorDays", with: "30")
+        tap("applyGoalRange")
+        tap("saveWheel")
+        XCTAssertTrue(wait { !self.app.buttons["saveWheel"].exists })
+        XCTAssertTrue(app.staticTexts["goalProgress"].waitForExistence(timeout: 5))
+        XCTAssertEqual(cents("todayAmount"), amount)
+    }
+
+    func testOnboardingGoalTakesThreeTapsWithDefaults() throws {
+        launch(onboarded: false)
+        tap("onboardingGoal", scroll: false) // Tap 1.
+        XCTAssertEqual(app.textFields["onboardingAmount"].value as? String, "5000")
+        XCTAssertEqual(app.textFields["onboardingDays"].value as? String, "100")
+        XCTAssertTrue(app.otherElements["onboardingEstimate"].exists || app.staticTexts["onboardingEstimate"].exists)
+        try shot("onboarding-goal")
+        tap("startSaving", scroll: false) // Tap 2.
+        XCTAssertTrue(app.buttons["spinButton"].waitForExistence(timeout: 5))
+        tap("spinButton", scroll: false) // Tap 3.
+        XCTAssertTrue(app.buttons["shareToday"].waitForExistence(timeout: 8))
+        XCTAssertEqual(cents("totalValue"), cents("todayAmount"))
+        tap("openGoals")
+        XCTAssertEqual(app.textFields["goalAmount"].value as? String, "5000.00")
+        try shot("26-onboarded-goal-persisted")
+    }
+
+    func testOnboardingBackAndCustomPlanValidation() throws {
+        launch(onboarded: false)
+        tap("onboardingGoal", scroll: false)
+        tap("onboardingBack", scroll: false)
+        XCTAssertTrue(app.buttons["onboardingCasual"].exists)
+        tap("onboardingGoal", scroll: false)
+        replaceText("onboardingAmount", with: "0")
+        XCTAssertFalse(app.buttons["startSaving"].isEnabled)
+        replaceText("onboardingAmount", with: "1000")
+        replaceText("onboardingDays", with: "30")
+        XCTAssertTrue(app.buttons["startSaving"].isEnabled)
+        tap("startSaving", scroll: false)
+        XCTAssertTrue(app.buttons["spinButton"].waitForExistence(timeout: 5))
+        tap("openGoals")
+        XCTAssertEqual(app.textFields["goalAmount"].value as? String, "1000.00")
+    }
+
+    func testUndoCannotRerollAndCanSaveAgainAfterRestart() throws {
+        launch()
+        tap("spinButton", scroll: false)
+        XCTAssertTrue(app.buttons["undoToday"].waitForExistence(timeout: 8))
+        tap("undoToday", scroll: false)
+        let amount = cents("todayAmount")
+        XCTAssertTrue(app.buttons["markSaved"].waitForExistence(timeout: 5))
+        XCTAssertEqual(cents("totalValue"), 0)
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        XCTAssertTrue(app.buttons["shareToday"].exists)
+        try shot("27-undone-amount-retained")
+        app.terminate()
+        launch(reset: false)
+        XCTAssertEqual(cents("todayAmount"), amount)
+        XCTAssertEqual(cents("totalValue"), 0)
+        XCTAssertFalse(app.buttons["spinButton"].exists)
+        tap("markSaved", scroll: false)
+        XCTAssertEqual(cents("totalValue"), amount)
+        XCTAssertTrue(app.buttons["undoToday"].exists)
+        XCTAssertTrue(wait { !self.app.buttons["undoToday"].exists })
+        XCTAssertEqual(cents("totalValue"), amount)
+        XCTAssertFalse(app.buttons["markSaved"].exists)
+        try shot("28-resaved-notice-expired")
+    }
+
+    func testResultShareOpensSystemSheetInOneTap() throws {
+        launch(["-demo", "-spun"])
+        XCTAssertTrue(app.buttons["shareToday"].label.contains("幸运数字"))
+        tap("shareToday", scroll: false)
+        XCTAssertTrue(waitForShareSheet())
+        XCTAssertFalse(app.buttons["shareImage"].exists)
+        try shot("29-direct-system-share")
+    }
+
+    func testOrdinaryResultAlsoOffersDirectShare() throws {
+        launch(["-demo", "-spun", "-ordinary"])
+        XCTAssertTrue(app.buttons["shareToday"].label.contains("晒一下今天的数"))
+        tap("shareToday", scroll: false)
+        XCTAssertTrue(waitForShareSheet())
+    }
+
+    func testOnboardingImportsFriendsWheelInOneTap() throws {
+        launch(["-clipboard-code", Self.importCode], onboarded: false)
+        tap("onboardingPaste", scroll: false)
+        XCTAssertTrue(app.buttons["spinButton"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.alerts.firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["onboardingTitle"].exists)
+        tap("openSettings")
+        XCTAssertEqual(app.textFields["maximumAmount"].value as? String, "20.00")
+        XCTAssertEqual(app.textFields["calculatorTarget"].value as? String, "1000.00")
+        try shot("30-onboarding-friends-wheel")
+    }
+
+    private static let importCode = "#今天存多少#eJxNjjEOwjAQBL-CtnZBKN1SUcEXLLFKLPnO6HwmoCh_j4iEYMqZLXbBE3EI0CRExEUe1Zz3w1hTQYAnG-lnqjfE4fghYJ7IgrhAsmbp8ssBkl5_6rTvszpHWrtqeSO6dQaUOt-MrXXjV_nE_YNkdazrBhmFM2Q#"
+}
